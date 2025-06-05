@@ -121,17 +121,37 @@ jobs:
       env:
         WPSCAN_API_TOKEN: ${{ secrets.VLAD_MARIUS_WPSCAN_TOKEN }}
       run: |
-        echo "=========================================="
         echo "WPSCAN RESULTS: ${{ matrix.wordpress_setup.name }}"
         echo "WordPress: ${{ matrix.wordpress_setup.version }}"
         echo "Plugins: ${{ matrix.wordpress_setup.plugins }}"
-        echo "=========================================="
+        
+        # Disable immediate exit on error to capture exit code
+        set +e
         
         wpscan --url http://localhost:${{ matrix.wordpress_setup.port }} \
           --api-token $WPSCAN_API_TOKEN \
           --enumerate vp,vt \
           --detection-mode aggressive \
           --format cli
+        
+        # Capture the exit code
+        exit_code=$?
+        
+        echo "SCAN SUMMARY"
+        
+        if [ $exit_code -eq 0 ]; then
+          echo "no vulns found"
+        elif [ $exit_code -eq 5 ]; then
+          echo "vuln detected in ${{ matrix.wordpress_setup.name }}"
+        elif [ $exit_code -eq 4 ]; then
+          echo "scan error"
+          exit $exit_code
+        else
+          echo "ok"
+          exit $exit_code
+        fi
+        
+        echo "=========================================="
 
     - name: Cleanup
       if: always()
