@@ -5,132 +5,108 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
-  schedule:
-    # Run weekly security scans
-    - cron: '0 2 * * 1'
   workflow_dispatch:
 
 env:
-  MYSQL_ROOT_PASSWORD: ${{ secrets.vlad_marius_MYSQL_ROOT_PASS }}
-  MYSQL_DATABASE: wordpress_security_db
-  MYSQL_USER: wp_security_user
-  MYSQL_PASSWORD: ${{ secrets.vlad_marius_MYSQL_USER_PASS }}
-  WORDPRESS_DB_HOST: mysql:3306
-  WORDPRESS_DB_NAME: wordpress_security_db
-  WORDPRESS_DB_USER: wp_security_user
-  WORDPRESS_DB_PASSWORD: ${{ secrets.vlad_marius_MYSQL_USER_PASS }}
-  WORDPRESS_ADMIN_USER: ${{ secrets.vlad_marius_WP_ADMIN_USER }}
-  WORDPRESS_ADMIN_PASS: ${{ secrets.vlad_marius_WP_ADMIN_PASS }}
-  WORDPRESS_ADMIN_EMAIL: ${{ secrets.vlad_marius_WP_ADMIN_EMAIL }}
+  MYSQL_ROOT_PASSWORD: ${{ secrets.VLAD_MARIUS_DB_PASS }}
+  MYSQL_DATABASE: wordpress_db
+  MYSQL_USER: wpuser
+  MYSQL_PASSWORD: ${{ secrets.VLAD_MARIUS_DB_PASS }}
 
 jobs:
   wordpress-security-scan:
     runs-on: ubuntu-latest
-    
-    strategy:
-      matrix:
-        wordpress_config:
-          - name: "wordpress-latest"
-            version: "latest"
-            plugins: "akismet,jetpack"
-            theme: "twentytwentythree"
-            port: "8080"
-          - name: "wordpress-legacy"
-            version: "5.8"
-            plugins: "contact-form-7,woocommerce"
-            theme: "twentytwenty"
-            port: "8081"
-          - name: "wordpress-vulnerable"
-            version: "5.0"
-            plugins: "ultimate-member,wp-file-manager"
-            theme: "twentynineteen"
-            port: "8082"
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
     - name: Create Docker network
-      run: docker network create wordpress-security-net
+      run: docker network create wp-net
 
     - name: Start MySQL Database
       run: |
         docker run -d \
-          --name mysql-${{ matrix.wordpress_config.name }} \
-          --network wordpress-security-net \
+          --name mysql-wp \
+          --network wp-net \
           -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_ROOT_PASSWORD }} \
           -e MYSQL_DATABASE=${{ env.MYSQL_DATABASE }} \
           -e MYSQL_USER=${{ env.MYSQL_USER }} \
           -e MYSQL_PASSWORD=${{ env.MYSQL_PASSWORD }} \
-          mysql:8.0
+          -e MYSQL_ROOT_HOST='%' \
+          mysql:8.0 \
+          --default-authentication-plugin=mysql_native_password
 
     - name: Wait for MySQL to be ready
       run: |
-        timeout 60 bash -c 'until docker exec mysql-${{ matrix.wordpress_config.name }} mysqladmin ping -h localhost --silent; do sleep 2; done'
+        echo "Waiting for MySQL..."
+        sleep 15
+        for i in {1..20}; do
+          if docker exec mysql-wp mysqladmin ping -h localhost --silent; then
+            echo "MySQL is ready!"
+            break
+          fi
+          echo "Waiting... ($i/20)"
+          sleep 3
+        done
 
-    - name: Start WordPress Site - ${{ matrix.wordpress_config.name }}
+    - name: Start WordPress Site
       run: |
         docker run -d \
-          --name wp-${{ matrix.wordpress_config.name }} \
-          --network wordpress-security-net \
-          -p ${{ matrix.wordpress_config.port }}:80 \
-          -e WORDPRESS_DB_HOST=${{ env.WORDPRESS_DB_HOST }} \
-          -e WORDPRESS_DB_NAME=${{ env.WORDPRESS_DB_NAME }} \
-          -e WORDPRESS_DB_USER=${{ env.WORDPRESS_DB_USER }} \
-          -e WORDPRESS_DB_PASSWORD=${{ env.WORDPRESS_DB_PASSWORD }} \
+          --name wordpress-site \
+          --network wp-net \
+          -p 8080:80 \
+          -e WORDPRESS_DB_HOST=mysql-wp:3306 \
+          -e WORDPRESS_DB_NAME=${{ env.MYSQL_DATABASE }} \
+          -e WORDPRESS_DB_USER=${{ env.MYSQL_USER }} \
+          -e WORDPRESS_DB_PASSWORD=${{ env.MYSQL_PASSWORD }} \
           -e WORDPRESS_CONFIG_EXTRA="
             define('WP_DEBUG', true);
-            define('WP_DEBUG_LOG', true);
-            define('SCRIPT_DEBUG', true);
             define('DISALLOW_FILE_EDIT', false);
-            define('FS_METHOD', 'direct');
           " \
-          wordpress:${{ matrix.wordpress_config.version }}
+          wordpress:5.0
 
     - name: Wait for WordPress to be ready
       run: |
-        timeout 180 bash -c 'until curl -f http://localhost:${{ matrix.wordpress_config.port }}/wp-admin/install.php; do sleep 5; done'
+        echo "Waiting for WordPress..."
+        sleep 20
+        for i in {1..30}; do
+          if curl -f -s http://localhost:8080/wp-admin/install.php > /dev/null 2>&1; then
+            echo "WordPress is ready!"
+            break
+          fi
+          echo "Waiting... ($i/30)"
+          sleep 5
+        done
 
-    - name: Install WordPress CLI
+    - name: Install WordPress CLI and Configure Site
       run: |
-        docker exec wp-${{ matrix.wordpress_config.name }} bash -c "
-          curl -O https://raw.githubusercontent.com/wp-cli/wp-cli/v2.8.1/utils/wp-completion.bash
+        docker exec wordpress-site bash -c "
+          apt-get update && apt-get install -y curl
           curl -sL https://github.com/wp-cli/wp-cli/releases/download/v2.8.1/wp-cli-2.8.1.phar -o wp-cli.phar
           chmod +x wp-cli.phar
           mv wp-cli.phar /usr/local/bin/wp
+          
+          wp core install \
+            --url=http://localhost:8080 \
+            --title='Security Test Site' \
+            --admin_user=admin \
+            --admin_password=password123 \
+            --admin_email=admin@test.com \
+            --allow-root
+          
+          # Install vulnerable plugins
+          wp plugin install ultimate-member --activate --allow-root || true
+          wp plugin install wp-file-manager --activate --allow-root || true
+          wp plugin install contact-form-7 --activate --allow-root || true
+          
+          # Create weak test users
+          wp user create testuser test@example.com --user_pass=123456 --role=administrator --allow-root || true
+          wp user create demo demo@example.com --user_pass=password --role=editor --allow-root || true
+          
+          # Enable user registration
+          wp option update users_can_register 1 --allow-root
         "
-
-    - name: Configure WordPress Installation
-      run: |
-        docker exec wp-${{ matrix.wordpress_config.name }} wp core install \
-          --url=http://localhost:${{ matrix.wordpress_config.port }} \
-          --title="Security Test Site - ${{ matrix.wordpress_config.name }}" \
-          --admin_user=${{ env.WORDPRESS_ADMIN_USER }} \
-          --admin_password=${{ env.WORDPRESS_ADMIN_PASS }} \
-          --admin_email=${{ env.WORDPRESS_ADMIN_EMAIL }} \
-          --allow-root
-
-    - name: Install Vulnerable Plugins and Themes
-      run: |
-        # Install specified plugins
-        IFS=',' read -ra PLUGINS <<< "${{ matrix.wordpress_config.plugins }}"
-        for plugin in "${PLUGINS[@]}"; do
-          docker exec wp-${{ matrix.wordpress_config.name }} wp plugin install $plugin --activate --allow-root || true
-        done
-        
-        # Install and activate theme
-        docker exec wp-${{ matrix.wordpress_config.name }} wp theme install ${{ matrix.wordpress_config.theme }} --activate --allow-root || true
-        
-        # Add some additional vulnerable configurations for testing
-        docker exec wp-${{ matrix.wordpress_config.name }} wp option update users_can_register 1 --allow-root
-        docker exec wp-${{ matrix.wordpress_config.name }} wp option update default_role editor --allow-root
-        
-        # Create test users with weak passwords
-        docker exec wp-${{ matrix.wordpress_config.name }} wp user create testuser test@example.com --user_pass=123456 --role=administrator --allow-root || true
-        docker exec wp-${{ matrix.wordpress_config.name }} wp user create demo demo@example.com --user_pass=password --role=editor --allow-root || true
 
     - name: Install WPScan
       run: |
@@ -139,174 +115,114 @@ jobs:
         sudo gem install wpscan
 
     - name: Update WPScan Database
+      env:
+        WPSCAN_API_TOKEN: ${{ secrets.VLAD_MARIUS_WPSCAN_TOKEN }}
       run: |
-        wpscan --update || true
+        wpscan --update --api-token $WPSCAN_API_TOKEN || wpscan --update
 
-    - name: Run WPScan - Enumerate Users
-      continue-on-error: true
+    - name: Run WPScan - Full Security Scan
+      env:
+        WPSCAN_API_TOKEN: ${{ secrets.VLAD_MARIUS_WPSCAN_TOKEN }}
       run: |
-        echo "=== WPScan Results for ${{ matrix.wordpress_config.name }} - User Enumeration ===" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-        wpscan --url http://localhost:${{ matrix.wordpress_config.port }} \
-          --enumerate u \
-          --format cli \
-          --output wpscan-users-${{ matrix.wordpress_config.name }}.txt || true
-        cat wpscan-users-${{ matrix.wordpress_config.name }}.txt | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-
-    - name: Run WPScan - Enumerate Plugins
-      continue-on-error: true
-      run: |
-        echo -e "\n=== Plugin Enumeration ===" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-        wpscan --url http://localhost:${{ matrix.wordpress_config.port }} \
-          --enumerate p \
+        echo "=== WPScan Security Analysis ===" | tee wpscan-results.txt
+        echo "Target: WordPress 5.0 (Intentionally Vulnerable)" | tee -a wpscan-results.txt
+        echo "Scan Date: $(date)" | tee -a wpscan-results.txt
+        echo "" | tee -a wpscan-results.txt
+        
+        wpscan --url http://localhost:8080 \
+          --api-token $WPSCAN_API_TOKEN \
+          --enumerate u,p,t,vp,vt \
+          --detection-mode aggressive \
           --plugins-detection aggressive \
           --format cli \
-          --output wpscan-plugins-${{ matrix.wordpress_config.name }}.txt || true
-        cat wpscan-plugins-${{ matrix.wordpress_config.name }}.txt | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-
-    - name: Run WPScan - Enumerate Themes
-      continue-on-error: true
-      run: |
-        echo -e "\n=== Theme Enumeration ===" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-        wpscan --url http://localhost:${{ matrix.wordpress_config.port }} \
-          --enumerate t \
-          --format cli \
-          --output wpscan-themes-${{ matrix.wordpress_config.name }}.txt || true
-        cat wpscan-themes-${{ matrix.wordpress_config.name }}.txt | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-
-    - name: Run WPScan - Vulnerability Scan
-      continue-on-error: true
-      run: |
-        echo -e "\n=== Vulnerability Scan ===" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-        wpscan --url http://localhost:${{ matrix.wordpress_config.port }} \
-          --enumerate vp,vt \
-          --detection-mode aggressive \
-          --format cli \
-          --output wpscan-vulns-${{ matrix.wordpress_config.name }}.txt || true
-        cat wpscan-vulns-${{ matrix.wordpress_config.name }}.txt | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-
-    - name: Run WPScan - Brute Force Attack Simulation
-      continue-on-error: true
-      env:
-        WPSCAN_API_TOKEN: ${{ secrets.vlad_marius_WPSCAN_API_TOKEN }}
-      run: |
-        echo -e "\n=== Brute Force Attack Simulation ===" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-        # Create a small wordlist for testing
-        echo -e "admin\npassword\n123456\nwordpress\ntest\ndemo\nroot" > small_wordlist.txt
+          --output wpscan-full-scan.txt || true
         
-        wpscan --url http://localhost:${{ matrix.wordpress_config.port }} \
-          --usernames ${{ env.WORDPRESS_ADMIN_USER }},testuser,demo,admin \
-          --passwords small_wordlist.txt \
-          --max-threads 5 \
-          --format cli \
-          --output wpscan-bruteforce-${{ matrix.wordpress_config.name }}.txt || true
-        cat wpscan-bruteforce-${{ matrix.wordpress_config.name }}.txt | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
+        cat wpscan-full-scan.txt | tee -a wpscan-results.txt
 
-    - name: Run Additional Security Checks
-      continue-on-error: true
+    - name: Run Brute Force Attack Simulation
       run: |
-        echo -e "\n=== Additional Security Checks ===" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
+        echo -e "\n=== Brute Force Attack Simulation ===" | tee -a wpscan-results.txt
         
-        # Check for exposed sensitive files
-        echo "Checking for exposed sensitive files:" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-        for file in wp-config.php.bak readme.html license.txt wp-config-sample.php; do
-          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ matrix.wordpress_config.port }}/$file)
-          echo "- $file: HTTP $response" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
+        # Create wordlist
+        echo -e "admin\npassword\n123456\nwordpress\ntest\ndemo\nroot\npassword123" > wordlist.txt
+        
+        wpscan --url http://localhost:8080 \
+          --usernames admin,testuser,demo \
+          --passwords wordlist.txt \
+          --max-threads 3 \
+          --format cli \
+          --output wpscan-bruteforce.txt || true
+        
+        cat wpscan-bruteforce.txt | tee -a wpscan-results.txt
+
+    - name: Additional Security Checks
+      run: |
+        echo -e "\n=== Additional Security Checks ===" | tee -a wpscan-results.txt
+        
+        # Check for exposed files
+        echo "Checking exposed sensitive files:" | tee -a wpscan-results.txt
+        for file in wp-config.php.bak readme.html license.txt wp-config-sample.php xmlrpc.php; do
+          status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/$file)
+          echo "- $file: HTTP $status" | tee -a wpscan-results.txt
         done
         
-        # Check directory listing
-        echo -e "\nChecking for directory listing:" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-        for dir in wp-content wp-includes wp-admin; do
-          response=$(curl -s http://localhost:${{ matrix.wordpress_config.port }}/$dir/ | grep -i "index of" && echo "EXPOSED" || echo "PROTECTED")
-          echo "- $dir/: $response" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
-        done
+        # Check XML-RPC
+        echo -e "\nTesting XML-RPC endpoint:" | tee -a wpscan-results.txt
+        curl -s -X POST -d "<?xml version='1.0'?><methodCall><methodName>system.listMethods</methodName></methodCall>" \
+             http://localhost:8080/xmlrpc.php | grep -q "methodResponse" && \
+             echo "XML-RPC is ENABLED (potential security risk)" | tee -a wpscan-results.txt || \
+             echo "XML-RPC check failed" | tee -a wpscan-results.txt
 
-    - name: Analyze Findings and Generate Security Report
+    - name: Generate Security Assessment
       run: |
-        echo "=== SECURITY ANALYSIS REPORT FOR ${{ matrix.wordpress_config.name }} ===" | tee security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "WordPress Version: ${{ matrix.wordpress_config.version }}" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "Plugins: ${{ matrix.wordpress_config.plugins }}" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "Theme: ${{ matrix.wordpress_config.theme }}" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "Scan Date: $(date)" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
+        echo "" | tee -a wpscan-results.txt
+        echo "=== SECURITY ASSESSMENT SUMMARY ===" | tee -a wpscan-results.txt
+        echo "" | tee -a wpscan-results.txt
         
-        # Count vulnerabilities
-        vuln_count=$(grep -c "Title:" wpscan-results-${{ matrix.wordpress_config.name }}.txt || echo "0")
-        user_count=$(grep -c "Username:" wpscan-results-${{ matrix.wordpress_config.name }}.txt || echo "0")
-        plugin_count=$(grep -c "Plugin:" wpscan-results-${{ matrix.wordpress_config.name }}.txt || echo "0")
+        # Count findings
+        vuln_count=$(grep -c "Title:" wpscan-results.txt || echo "0")
+        user_count=$(grep -c "Username:" wpscan-results.txt || echo "0")
+        plugin_count=$(grep -c "Plugin Name:" wpscan-results.txt || echo "0")
         
-        echo "FINDINGS SUMMARY:" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "- Vulnerabilities Found: $vuln_count" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "- Users Enumerated: $user_count" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "- Plugins Detected: $plugin_count" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
+        echo "FINDINGS:" | tee -a wpscan-results.txt
+        echo "- Vulnerabilities: $vuln_count" | tee -a wpscan-results.txt
+        echo "- Enumerated Users: $user_count" | tee -a wpscan-results.txt
+        echo "- Detected Plugins: $plugin_count" | tee -a wpscan-results.txt
+        echo "" | tee -a wpscan-results.txt
         
-        echo "POTENTIAL EXPLOITATION METHODS:" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "1. User Enumeration: Discovered usernames can be used for brute force attacks" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "2. Plugin Vulnerabilities: Outdated plugins may have known exploits" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "3. Weak Credentials: Default/weak passwords enable unauthorized access" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "4. Version Disclosure: WordPress version information aids targeted attacks" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
-        echo "5. Configuration Issues: Debug mode and file permissions may expose sensitive data" | tee -a security-report-${{ matrix.wordpress_config.name }}.txt
+        echo "EXPLOITATION SCENARIOS:" | tee -a wpscan-results.txt
+        echo "1. USER ENUMERATION → Brute force attacks against discovered usernames" | tee -a wpscan-results.txt
+        echo "2. WEAK CREDENTIALS → Direct admin panel access with default/weak passwords" | tee -a wpscan-results.txt
+        echo "3. OUTDATED PLUGINS → Known CVE exploitation (Ultimate Member, WP File Manager)" | tee -a wpscan-results.txt
+        echo "4. VERSION DISCLOSURE → WordPress 5.0 has multiple known vulnerabilities" | tee -a wpscan-results.txt
+        echo "5. XML-RPC ENABLED → Potential for amplification attacks and brute forcing" | tee -a wpscan-results.txt
+        echo "6. DEBUG MODE → Information disclosure through error messages" | tee -a wpscan-results.txt
+        echo "7. FILE EDIT ENABLED → Code injection if admin access is gained" | tee -a wpscan-results.txt
+        echo "" | tee -a wpscan-results.txt
+        
+        echo "CRITICAL RISKS:" | tee -a wpscan-results.txt
+        echo "- WordPress 5.0 is severely outdated (released 2018)" | tee -a wpscan-results.txt
+        echo "- Multiple vulnerable plugins installed" | tee -a wpscan-results.txt
+        echo "- Weak authentication controls" | tee -a wpscan-results.txt
+        echo "- Insecure configuration settings" | tee -a wpscan-results.txt
 
-    - name: Display Complete Scan Results
+    - name: Display Complete Results
       run: |
-        echo "=== COMPLETE SCAN RESULTS FOR ${{ matrix.wordpress_config.name }} ==="
-        cat wpscan-results-${{ matrix.wordpress_config.name }}.txt
-        echo ""
-        echo "=== SECURITY REPORT ==="
-        cat security-report-${{ matrix.wordpress_config.name }}.txt
+        echo "=== COMPLETE WPSCAN SECURITY RESULTS ==="
+        cat wpscan-results.txt
 
-    - name: Upload Scan Results as Artifacts
+    - name: Upload Security Scan Results
       uses: actions/upload-artifact@v4
       with:
-        name: wpscan-results-${{ matrix.wordpress_config.name }}
+        name: wordpress-security-scan-results
         path: |
-          wpscan-results-${{ matrix.wordpress_config.name }}.txt
-          security-report-${{ matrix.wordpress_config.name }}.txt
-          wpscan-*-${{ matrix.wordpress_config.name }}.txt
+          wpscan-results.txt
+          wpscan-*.txt
         retention-days: 30
 
-    - name: Cleanup Docker Containers
+    - name: Cleanup
       if: always()
       run: |
-        docker stop wp-${{ matrix.wordpress_config.name }} mysql-${{ matrix.wordpress_config.name }} || true
-        docker rm wp-${{ matrix.wordpress_config.name }} mysql-${{ matrix.wordpress_config.name }} || true
-
-  security-summary:
-    needs: wordpress-security-scan
-    runs-on: ubuntu-latest
-    if: always()
-    
-    steps:
-    - name: Download all scan results
-      uses: actions/download-artifact@v4
-      
-    - name: Generate Combined Security Report
-      run: |
-        echo "=== COMBINED SECURITY ASSESSMENT REPORT ===" > combined-security-report.txt
-        echo "Generated: $(date)" >> combined-security-report.txt
-        echo "GitHub Actions Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> combined-security-report.txt
-        echo "" >> combined-security-report.txt
-        
-        echo "TESTED CONFIGURATIONS:" >> combined-security-report.txt
-        echo "1. WordPress Latest (Port 8080) - Modern setup with current plugins" >> combined-security-report.txt
-        echo "2. WordPress Legacy v5.8 (Port 8081) - Older version with popular plugins" >> combined-security-report.txt
-        echo "3. WordPress Vulnerable v5.0 (Port 8082) - Intentionally vulnerable setup" >> combined-security-report.txt
-        echo "" >> combined-security-report.txt
-        
-        echo "SECURITY RECOMMENDATIONS:" >> combined-security-report.txt
-        echo "- Update WordPress core and all plugins to latest versions" >> combined-security-report.txt
-        echo "- Implement strong password policies and two-factor authentication" >> combined-security-report.txt
-        echo "- Disable user enumeration and limit login attempts" >> combined-security-report.txt
-        echo "- Remove default/unused themes and plugins" >> combined-security-report.txt
-        echo "- Implement Web Application Firewall (WAF)" >> combined-security-report.txt
-        echo "- Regular security audits and vulnerability scanning" >> combined-security-report.txt
-        echo "- Secure file permissions and disable file editing in admin panel" >> combined-security-report.txt
-        
-        cat combined-security-report.txt
-        
-    - name: Upload Combined Report
-      uses: actions/upload-artifact@v4
-      with:
-        name: combined-security-assessment
-        path: combined-security-report.txt
-        retention-days: 90
+        docker stop wordpress-site mysql-wp 2>/dev/null || true
+        docker rm wordpress-site mysql-wp 2>/dev/null || true
+        docker network rm wp-net 2>/dev/null || true
