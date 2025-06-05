@@ -11,17 +11,17 @@ on:
   workflow_dispatch:
 
 env:
-  MYSQL_ROOT_PASSWORD: ${{ secrets.YOUR_NAME_MYSQL_ROOT_PASS }}
+  MYSQL_ROOT_PASSWORD: ${{ secrets.vlad_marius_MYSQL_ROOT_PASS }}
   MYSQL_DATABASE: wordpress_security_db
   MYSQL_USER: wp_security_user
-  MYSQL_PASSWORD: ${{ secrets.YOUR_NAME_MYSQL_USER_PASS }}
+  MYSQL_PASSWORD: ${{ secrets.vlad_marius_MYSQL_USER_PASS }}
   WORDPRESS_DB_HOST: mysql:3306
   WORDPRESS_DB_NAME: wordpress_security_db
   WORDPRESS_DB_USER: wp_security_user
-  WORDPRESS_DB_PASSWORD: ${{ secrets.YOUR_NAME_MYSQL_USER_PASS }}
-  WORDPRESS_ADMIN_USER: ${{ secrets.YOUR_NAME_WP_ADMIN_USER }}
-  WORDPRESS_ADMIN_PASS: ${{ secrets.YOUR_NAME_WP_ADMIN_PASS }}
-  WORDPRESS_ADMIN_EMAIL: ${{ secrets.YOUR_NAME_WP_ADMIN_EMAIL }}
+  WORDPRESS_DB_PASSWORD: ${{ secrets.vlad_marius_MYSQL_USER_PASS }}
+  WORDPRESS_ADMIN_USER: ${{ secrets.vlad_marius_WP_ADMIN_USER }}
+  WORDPRESS_ADMIN_PASS: ${{ secrets.vlad_marius_WP_ADMIN_PASS }}
+  WORDPRESS_ADMIN_EMAIL: ${{ secrets.vlad_marius_WP_ADMIN_EMAIL }}
 
 jobs:
   wordpress-security-scan:
@@ -187,7 +187,7 @@ jobs:
     - name: Run WPScan - Brute Force Attack Simulation
       continue-on-error: true
       env:
-        WPSCAN_API_TOKEN: ${{ secrets.YOUR_NAME_WPSCAN_API_TOKEN }}
+        WPSCAN_API_TOKEN: ${{ secrets.vlad_marius_WPSCAN_API_TOKEN }}
       run: |
         echo -e "\n=== Brute Force Attack Simulation ===" | tee -a wpscan-results-${{ matrix.wordpress_config.name }}.txt
         # Create a small wordlist for testing
