@@ -111,7 +111,7 @@ jobs:
       working-directory: wordpress-configs
       run: |
         echo "Starting WordPress ${{ matrix.wordpress_version }} with theme ${{ matrix.theme }}"
-        docker-compose up -d
+        docker compose up -d
         
         # Wait for services to be ready
         echo "Waiting for WordPress to be ready..."
@@ -128,7 +128,7 @@ jobs:
         
         if [ $timeout -le 0 ]; then
           echo "WordPress failed to start properly"
-          docker-compose logs
+          docker compose logs
           exit 1
         fi
 
@@ -238,9 +238,9 @@ jobs:
       working-directory: wordpress-configs
       run: |
         echo "=== WordPress Container Logs ==="
-        docker-compose logs wordpress || true
+        docker compose logs wordpress || true
         echo "=== Database Container Logs ==="
-        docker-compose logs db || true
+        docker compose logs db || true
 
     - name: Upload scan results
       uses: actions/upload-artifact@v4
@@ -256,7 +256,7 @@ jobs:
       if: always()
       working-directory: wordpress-configs
       run: |
-        docker-compose down -v
+        docker compose down -v
         docker system prune -f
 
   security-summary:
